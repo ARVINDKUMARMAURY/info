@@ -16,21 +16,21 @@ from telegram.constants import ParseMode
 from telegram.error import BadRequest
 
 # ══════════════════════════════════════════════════════════════════
-#  ⚙️  CONFIG - ALL HARDCODED
+#  ⚙️  CONFIG (HARDCODED)
 # ══════════════════════════════════════════════════════════════════
 BOT_TOKEN      = "8794125671:AAEJltnbzbA9ITaN09wuZ0byV0QDqVZXAAY"
-API_KEY        = "36473890"   # tg-to-num API key
 OWNER_ID       = 7302427268
 OWNER_USERNAME = "l_Smoke_ll"
 MONGO_URI      = "mongodb+srv://yb131567_db_user:R8zxuvc9Qn999Arg@cluster0.drjaxl8.mongodb.net/telegram_bot?retryWrites=true&w=majority"
 SUPPORT_GROUP  = "https://t.me/+6JT140NC2VtkODk1"
-LOG_GROUP_ID   = 0   # No log group
+LOG_GROUP_ID   = 0
 
 # ── APIs ──
-API_BASE          = "https://tg-to-num-six.vercel.app/"
-PHONE_API_URL     = "https://nmdllpezcocquamhgpmb.supabase.co/functions/v1/lookup"
 TG2PHONE_API_URL  = "https://project-fawn-eight-95.vercel.app/tg2phone/api"
-TG2PHONE_API_KEY  = "yadav"
+TG2PHONE_API_KEY  = "yadav"   # Hardcoded key
+
+# ── Phone Lookup API ──
+PHONE_API_URL     = "https://nmdllpezcocquamhgpmb.supabase.co/functions/v1/lookup"
 
 # ── Force Subscribe Channels ──
 REQUIRED_CHANNELS = ["@datacheak", "@Josap03"]
@@ -209,20 +209,8 @@ async def check_and_increment_lookup(user_id: int) -> tuple:
 #  🌐  API CALLS
 # ══════════════════════════════════════════════════════════════════
 async def fetch_info(query: str) -> dict:
-    # ── Try primary API ──
-    try:
-        timeout = aiohttp.ClientTimeout(total=15, connect=5)
-        async with aiohttp.ClientSession() as s:
-            async with s.get(API_BASE, params={"key": API_KEY, "q": query}, timeout=timeout) as r:
-                if r.status == 200:
-                    data = await r.json(content_type=None)
-                    if data and data.get("success") != False:
-                        return data
-    except Exception as e:
-        logger.warning("Primary API failed: %s", e)
-
-    # ── Fallback ──
-    logger.info("Falling back to tg2phone API for: %s", query)
+    """Only tg2phone API"""
+    logger.info("Fetching info for: %s", query)
     try:
         timeout = aiohttp.ClientTimeout(total=15, connect=5)
         async with aiohttp.ClientSession() as s:
@@ -232,11 +220,12 @@ async def fetch_info(query: str) -> dict:
                 data = await r.json(content_type=None)
 
                 if not data or not data.get("result", {}).get("success"):
-                    return {"success": False, "message": "Not found in secondary API"}
+                    return {"success": False, "message": "Not found in API"}
 
                 result = data.get("result", {})
                 record = result.get("record", {})
 
+                # Get latest name
                 name = "—"
                 name_history = record.get("name_history", [])
                 if name_history and isinstance(name_history, list):
@@ -279,7 +268,7 @@ async def fetch_info(query: str) -> dict:
                 return formatted
 
     except Exception as e:
-        logger.exception("Secondary API failed")
+        logger.exception("tg2phone API failed")
         return {"success": False, "message": str(e)}
 
 async def fetch_phone_info(number: str) -> dict:
@@ -329,7 +318,7 @@ async def ensure_membership(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 
 # ══════════════════════════════════════════════════════════════════
-#  🎨  HELPERS & KEYBOARDS
+#  🎨  HELPERS & KEYBOARDS (same as before)
 # ══════════════════════════════════════════════════════════════════
 def hv(val, fallback="—", maxlen=300) -> str:
     if val is None or str(val).strip().lower() in ("", "null", "none"):
@@ -547,21 +536,10 @@ async def perform_lookup(update: Update, ctx: ContextTypes.DEFAULT_TYPE, query: 
                     phone=(data.get("phone_info") or {}).get("number", ""))
 
         text = format_tg_result(data)
-
-        pic = data.get("profile_pic")
-        if pic:
-            await msg.delete()
-            send_photo = (update.message.reply_photo if update.message
-                          else update.callback_query.message.reply_photo)
-            try:
-                await send_photo(pic, caption=text[:1024], parse_mode=HTML)
-            except BadRequest:
-                await safe_send(reply_fn, text)
-        else:
-            await safe_edit(msg, text)
+        await safe_edit(msg, text)
 
     except asyncio.TimeoutError:
-        await safe_edit(msg, "❌ <b>Timeout!</b> API ne 15 sec mein reply nahi kiya.", reply_markup=back_kb())
+        await safe_edit(msg, "❌ <b>Timeout!</b>", reply_markup=back_kb())
     except aiohttp.ClientError:
         await safe_edit(msg, "❌ <b>Network Error!</b>", reply_markup=back_kb())
     except Exception as e:
