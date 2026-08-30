@@ -2,7 +2,7 @@ import os, re, json, logging, aiohttp, asyncio
 from motor.motor_asyncio import AsyncIOMotorClient
 from pymongo import ReturnDocument
 from html import escape as he
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -19,7 +19,7 @@ from telegram.error import BadRequest
 #  ⚙️  CONFIG
 # ══════════════════════════════════════════════════════════════════
 BOT_TOKEN      = os.getenv("BOT_TOKEN")
-API_KEY        = os.getenv("API_KEY")   # tg-to-num API key
+API_KEY        = os.getenv("API_KEY")
 OWNER_ID       = int(os.getenv("OWNER_ID"))
 OWNER_USERNAME = "l_Smoke_ll"
 MONGO_URI      = os.getenv("MONGO_URI", "mongodb+srv://yb131567_db_user:R8zxuvc9Qn999Arg@cluster0.drjaxl8.mongodb.net/telegram_bot?retryWrites=true&w=majority")
@@ -35,13 +35,16 @@ TG2PHONE_API_KEY  = "yadav"
 # ── Force Subscribe Channels ──
 REQUIRED_CHANNELS = ["@datacheak", "@Josap03"]
 
+# ── Daily Limit ──
+DAILY_LIMIT = 10
+SHARE_BONUS = 3
+
 logging.basicConfig(format="%(asctime)s | %(levelname)s | %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 HTML = ParseMode.HTML
 
-
 # ══════════════════════════════════════════════════════════════════
-#  🛡️  SAFE HELPERS
+#  🛡️  SAFE HELPERS (same as before)
 # ══════════════════════════════════════════════════════════════════
 def strip_html(text: str) -> str:
     return re.sub(r"<[^>]+>", "", text)
@@ -80,7 +83,6 @@ async def safe_edit(msg, text: str, reply_markup=None, parse_mode=HTML):
         else:
             logger.error("safe_edit error: %s", e)
 
-
 # ══════════════════════════════════════════════════════════════════
 #  🗄️  DATABASE
 # ══════════════════════════════════════════════════════════════════
@@ -100,18 +102,32 @@ async def init_db():
 
 def _default_user(uid, username="", full_name="", language_code=""):
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    today = datetime.now().strftime("%Y-%m-%d")
     return {
-        "user_id": uid, "username": username,
-        "full_name": full_name, "language_code": language_code,
-        "total_lookups": 0, "total_phone_lookups": 0,
-        "last_seen": now, "joined_at": now,
+        "user_id": uid,
+        "username": username,
+        "full_name": full_name,
+        "language_code": language_code,
+        "total_lookups": 0,
+        "total_phone_lookups": 0,
+        "last_seen": now,
+        "joined_at": now,
+        "daily_lookups": 0,
+        "last_reset_date": today,
+        "extra_lookups": 0,
+        "has_shared_bonus": False,
     }
 
 async def upsert_user(u):
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    today = datetime.now().strftime("%Y-%m-%d")
     default = _default_user(u.id, u.username or "", u.full_name or "", u.language_code or "")
-    set_fields = {"username": u.username or "", "full_name": u.full_name or "",
-                  "language_code": u.language_code or "", "last_seen": now}
+    set_fields = {
+        "username": u.username or "",
+        "full_name": u.full_name or "",
+        "language_code": u.language_code or "",
+        "last_seen": now,
+    }
     on_insert = {k: v for k, v in default.items() if k not in set_fields}
     await _mdb.users.update_one(
         {"user_id": u.id},
@@ -145,25 +161,60 @@ async def get_user_history(user_id, limit=10):
 def is_owner(user_id):
     return user_id == OWNER_ID
 
+# ══════════════════════════════════════════════════════════════════
+#  🔒  DAILY LIMIT SYSTEM
+# ══════════════════════════════════════════════════════════════════
+async def check_and_increment_lookup(user_id: int) -> tuple:
+    """
+    Returns (allowed, message, keyboard)
+    allowed: True if within limit and incremented, False if limit reached
+    message: info string
+    keyboard: optional reply markup
+    """
+    today = datetime.now().strftime("%Y-%m-%d")
+    user = await get_user(user_id)
+    if not user:
+        return False, "User not found", None
+
+    # Reset daily if new day
+    if user.get("last_reset_date") != today:
+        await _mdb.users.update_one(
+            {"user_id": user_id},
+            {"$set": {"daily_lookups": 0, "last_reset_date": today}}
+        )
+        user["daily_lookups"] = 0
+        user["last_reset_date"] = today
+
+    daily = user.get("daily_lookups", 0)
+    extra = user.get("extra_lookups", 0)
+    limit = DAILY_LIMIT + extra
+
+    if daily >= limit:
+        # Limit reached
+        kb = None
+        if not user.get("has_shared_bonus", False):
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("📤 Share & Get +3", callback_data="share_bonus")]
+            ])
+        msg = f"❌ <b>Daily limit reached!</b>\n\n" \
+              f"📊 You used <code>{daily}</code> out of <code>{limit}</code> lookups today.\n" \
+              f"🔁 Limit resets at midnight.\n"
+        if not user.get("has_shared_bonus"):
+            msg += "\n💡 <b>Share this bot</b> to get +3 extra lookups!"
+        return False, msg, kb
+
+    # Increment daily count
+    await _mdb.users.update_one(
+        {"user_id": user_id},
+        {"$inc": {"daily_lookups": 1}}
+    )
+    return True, None, None
 
 # ══════════════════════════════════════════════════════════════════
-#  📣  LOG GROUP NOTIFIER
-# ══════════════════════════════════════════════════════════════════
-async def notify_log_group(bot, text: str, kb=None):
-    if not LOG_GROUP_ID:
-        return
-    try:
-        await bot.send_message(LOG_GROUP_ID, text, parse_mode=HTML, reply_markup=kb)
-    except Exception as e:
-        logger.warning("Log group notify failed: %s", e)
-
-
-# ══════════════════════════════════════════════════════════════════
-#  🌐  API CALLS
+#  🌐  API CALLS (same as before)
 # ══════════════════════════════════════════════════════════════════
 async def fetch_info(query: str) -> dict:
-    """Try primary API first, fallback to secondary API"""
-    # ── Try primary API (tg-to-num) ──
+    # ── Try primary API ──
     try:
         timeout = aiohttp.ClientTimeout(total=15, connect=5)
         async with aiohttp.ClientSession() as s:
@@ -175,7 +226,7 @@ async def fetch_info(query: str) -> dict:
     except Exception as e:
         logger.warning("Primary API failed: %s", e)
 
-    # ── Fallback to secondary API (tg2phone) ──
+    # ── Fallback ──
     logger.info("Falling back to tg2phone API for: %s", query)
     try:
         timeout = aiohttp.ClientTimeout(total=15, connect=5)
@@ -191,7 +242,6 @@ async def fetch_info(query: str) -> dict:
                 result = data.get("result", {})
                 record = result.get("record", {})
 
-                # Get latest name from name_history
                 name = "—"
                 name_history = record.get("name_history", [])
                 if name_history and isinstance(name_history, list):
@@ -238,7 +288,6 @@ async def fetch_info(query: str) -> dict:
         return {"success": False, "message": str(e)}
 
 async def fetch_phone_info(number: str) -> dict:
-    """Phone number → details via Supabase Edge Function"""
     timeout = aiohttp.ClientTimeout(total=15, connect=5)
     async with aiohttp.ClientSession() as s:
         async with s.get(PHONE_API_URL, params={"number": number}, timeout=timeout) as r:
@@ -246,9 +295,8 @@ async def fetch_phone_info(number: str) -> dict:
                 return {"success": False, "message": f"API Error {r.status}"}
             return await r.json(content_type=None)
 
-
 # ══════════════════════════════════════════════════════════════════
-#  🔐  FORCE SUBSCRIBE
+#  🔐  FORCE SUBSCRIBE (same)
 # ══════════════════════════════════════════════════════════════════
 async def ensure_membership(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     user_id = update.effective_user.id
@@ -282,7 +330,6 @@ async def ensure_membership(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     context.user_data["verified_membership"] = True
     return True
-
 
 # ══════════════════════════════════════════════════════════════════
 #  🎨  HELPERS & KEYBOARDS
@@ -331,7 +378,6 @@ def format_tg_result(d: dict) -> str:
     if uname:
         name_line += f" | @{he(uname)}"
 
-    # ── Extra fields from secondary API ──
     extra = d.get("_extra", {})
     extra_lines = ""
     if extra.get("contact_links"):
@@ -365,18 +411,6 @@ def format_tg_result(d: dict) -> str:
     )
 
 def format_phone_result(data: dict, number: str) -> str:
-    """
-    Supabase Edge Function response format:
-    {
-      "success": true,
-      "result": {
-        "success": true,
-        "result": {
-          "results": [ { "mobile", "name", "father_name", "address", "alternate", "circle", "aadhar", "email" } ]
-        }
-      }
-    }
-    """
     ICONS = {
         "name": "👤",
         "father_name": "👨",
@@ -392,7 +426,6 @@ def format_phone_result(data: dict, number: str) -> str:
 
     lines = f"📱 <b>{he(number)}</b>\n\n"
 
-    # Extract results from nested structure
     results = []
     if data.get("success"):
         outer_result = data.get("result") or {}
@@ -403,7 +436,6 @@ def format_phone_result(data: dict, number: str) -> str:
     if not results:
         lines += "❌ <b>No data found</b>\n"
     else:
-        # Deduplicate
         seen = set()
         unique = []
         for r in results:
@@ -464,9 +496,22 @@ async def user_profile_text(user_id: int, full_name: str) -> str:
     u = await get_user(user_id)
     fname  = he(full_name or "User")
     role   = "👑 Owner" if is_owner(user_id) else "👤 User"
+
+    today = datetime.now().strftime("%Y-%m-%d")
+    if u.get("last_reset_date") != today:
+        daily = 0
+    else:
+        daily = u.get("daily_lookups", 0)
+    extra = u.get("extra_lookups", 0)
+    limit = DAILY_LIMIT + extra
+    remaining = limit - daily if limit > daily else 0
+
     return (
         f"{role}  |  👤 <b>{fname}</b>  |  🆔 <code>{user_id}</code>\n\n"
-        f"📊 <b>Stats</b>\n"
+        f"📊 <b>Today's Lookups</b>\n"
+        f"├ Used  : {daily} / {limit}\n"
+        f"└ Extra : +{extra}\n\n"
+        f"📈 <b>Total Stats</b>\n"
         f"├ Username Lookups : {(u['total_lookups'] if u else 0)}\n"
         f"├ Phone Lookups    : {(u['total_phone_lookups'] if u else 0)}\n"
         f"└ Joined           : {(u['joined_at'] or '')[:10] if u else '—'}\n\n"
@@ -475,11 +520,18 @@ async def user_profile_text(user_id: int, full_name: str) -> str:
 
 
 # ══════════════════════════════════════════════════════════════════
-#  🔎  CORE LOOKUPS
+#  🔎  CORE LOOKUPS (with limit check)
 # ══════════════════════════════════════════════════════════════════
 async def perform_lookup(update: Update, ctx: ContextTypes.DEFAULT_TYPE, query: str):
     user_id = update.effective_user.id
     await upsert_user(update.effective_user)
+
+    # ── Limit check ──
+    allowed, msg, kb = await check_and_increment_lookup(user_id)
+    if not allowed:
+        reply_fn = update.message.reply_text if update.message else update.callback_query.message.reply_text
+        await safe_send(reply_fn, msg, reply_markup=kb)
+        return
 
     reply_fn = update.message.reply_text if update.message else update.callback_query.message.reply_text
     msg = await reply_fn("🔍 <b>Searching Telegram...</b>", parse_mode=HTML)
@@ -520,10 +572,16 @@ async def perform_lookup(update: Update, ctx: ContextTypes.DEFAULT_TYPE, query: 
         logger.exception("perform_lookup")
         await safe_edit(msg, f"❌ <b>Error:</b> <code>{he(str(e))}</code>", reply_markup=back_kb())
 
-
 async def perform_phone_lookup(update: Update, ctx: ContextTypes.DEFAULT_TYPE, number: str):
     user_id = update.effective_user.id
     await upsert_user(update.effective_user)
+
+    # ── Limit check ──
+    allowed, msg, kb = await check_and_increment_lookup(user_id)
+    if not allowed:
+        reply_fn = update.message.reply_text if update.message else update.callback_query.message.reply_text
+        await safe_send(reply_fn, msg, reply_markup=kb)
+        return
 
     number = number.strip().replace(" ", "").replace("-", "")
     if not number.lstrip("+").isdigit() or len(number.lstrip("+")) < 7:
@@ -546,7 +604,6 @@ async def perform_phone_lookup(update: Update, ctx: ContextTypes.DEFAULT_TYPE, n
             await safe_edit(msg, f"❌ <b>Error:</b> <code>{he(str(err))}</code>", reply_markup=back_kb())
             return
 
-        # Extract name from first result for history
         result_name = ""
         if data.get("result", {}).get("result", {}).get("results"):
             result_name = data["result"]["result"]["results"][0].get("name", "")
@@ -567,7 +624,7 @@ async def perform_phone_lookup(update: Update, ctx: ContextTypes.DEFAULT_TYPE, n
 
 
 # ══════════════════════════════════════════════════════════════════
-#  📟  COMMANDS
+#  📟  COMMANDS & BUTTON HANDLER
 # ══════════════════════════════════════════════════════════════════
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await ensure_membership(update, ctx):
@@ -580,6 +637,16 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     u = await get_user(uid)
     total_lookups = (u["total_lookups"] if u else 0) + (u["total_phone_lookups"] if u else 0)
 
+    # Show remaining
+    today = datetime.now().strftime("%Y-%m-%d")
+    if u.get("last_reset_date") != today:
+        daily = 0
+    else:
+        daily = u.get("daily_lookups", 0)
+    extra = u.get("extra_lookups", 0)
+    limit = DAILY_LIMIT + extra
+    remaining = limit - daily if limit > daily else 0
+
     await safe_send(
         update.message.reply_text,
         f"🤖 <b>Smoke Bot - COMPLETELY FREE</b>\n\n"
@@ -587,16 +654,15 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"Username, User ID ya Phone Number bhejo — 2 options milenge:\n"
         f"📱 <b>Telegram Info</b> — username se details nikalo\n"
         f"📞 <b>Number Info</b> — phone number se info nikalo\n\n"
-        f"📊 <b>Tumhare Searches</b>\n"
+        f"📊 <b>Today's Limit</b>\n"
+        f"├ Used  : {daily} / {limit}\n"
+        f"└ Remaining : {remaining}\n\n"
+        f"📊 <b>Tumhare Total Searches</b>\n"
         f"└ Total Lookups : <code>{total_lookups}</code>\n"
         f"\n✦ <b>Made by @{OWNER_USERNAME}</b>",
         reply_markup=main_menu_kb(uid),
     )
 
-
-# ══════════════════════════════════════════════════════════════════
-#  💬  SMART MESSAGE HANDLER
-# ══════════════════════════════════════════════════════════════════
 async def smart_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await ensure_membership(update, ctx):
         return
@@ -650,10 +716,6 @@ async def smart_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             reply_markup=main_menu_kb(uid),
         )
 
-
-# ══════════════════════════════════════════════════════════════════
-#  🖱️  BUTTON HANDLER
-# ══════════════════════════════════════════════════════════════════
 async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q    = update.callback_query
     await q.answer()
@@ -667,6 +729,39 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             if "message is not modified" not in str(e).lower():
                 logger.warning("edit: %s", e)
 
+    # ── Share Bonus ──
+    if data == "share_bonus":
+        user = await get_user(uid)
+        if user.get("has_shared_bonus", False):
+            await q.answer("You already got your bonus!", show_alert=True)
+            return
+        # Give bonus
+        await _mdb.users.update_one(
+            {"user_id": uid},
+            {"$inc": {"extra_lookups": SHARE_BONUS}, "$set": {"has_shared_bonus": True}}
+        )
+        await q.answer(f"🎉 +{SHARE_BONUS} extra lookups added!", show_alert=True)
+        # Update message to show new limit
+        u = await get_user(uid)
+        today = datetime.now().strftime("%Y-%m-%d")
+        if u.get("last_reset_date") != today:
+            daily = 0
+        else:
+            daily = u.get("daily_lookups", 0)
+        extra = u.get("extra_lookups", 0)
+        limit = DAILY_LIMIT + extra
+        remaining = limit - daily if limit > daily else 0
+        await edit(
+            f"✅ <b>Bonus Added!</b>\n\n"
+            f"📊 <b>Today's Limit</b>\n"
+            f"├ Used  : {daily} / {limit}\n"
+            f"└ Remaining : {remaining}\n\n"
+            f"Now you can continue using the bot.",
+            back_kb()
+        )
+        return
+
+    # ── Verify membership ──
     if data == "verify_membership":
         if await ensure_membership(update, ctx):
             u = await get_user(uid)
@@ -713,9 +808,21 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         u = await get_user(uid)
         total_lookups = (u["total_lookups"] if u else 0) + (u["total_phone_lookups"] if u else 0)
         fname   = he(update.effective_user.first_name or "User")
+        # remaining
+        today = datetime.now().strftime("%Y-%m-%d")
+        if u.get("last_reset_date") != today:
+            daily = 0
+        else:
+            daily = u.get("daily_lookups", 0)
+        extra = u.get("extra_lookups", 0)
+        limit = DAILY_LIMIT + extra
+        remaining = limit - daily if limit > daily else 0
         await edit(
             f"🤖 <b>Smoke Bot</b>\n\n"
             f"👋 <b>{fname}</b>\n\n"
+            f"📊 <b>Today's Limit</b>\n"
+            f"├ Used  : {daily} / {limit}\n"
+            f"└ Remaining : {remaining}\n\n"
             f"📊 <b>Tumhare Searches</b>\n"
             f"└ Total : <code>{total_lookups}</code>\n\n"
             f"✦ <b>Made by @{OWNER_USERNAME}</b>",
