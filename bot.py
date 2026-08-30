@@ -16,15 +16,15 @@ from telegram.constants import ParseMode
 from telegram.error import BadRequest
 
 # ══════════════════════════════════════════════════════════════════
-#  ⚙️  CONFIG
+#  ⚙️  CONFIG - ALL HARDCODED
 # ══════════════════════════════════════════════════════════════════
-BOT_TOKEN      = os.getenv("BOT_TOKEN")
-API_KEY        = os.getenv("API_KEY")
-OWNER_ID       = int(os.getenv("OWNER_ID"))
+BOT_TOKEN      = "8794125671:AAEJltnbzbA9ITaN09wuZ0byV0QDqVZXAAY"
+API_KEY        = "36473890"   # tg-to-num API key
+OWNER_ID       = 7302427268
 OWNER_USERNAME = "l_Smoke_ll"
-MONGO_URI      = os.getenv("MONGO_URI", "mongodb+srv://yb131567_db_user:R8zxuvc9Qn999Arg@cluster0.drjaxl8.mongodb.net/telegram_bot?retryWrites=true&w=majority")
+MONGO_URI      = "mongodb+srv://yb131567_db_user:R8zxuvc9Qn999Arg@cluster0.drjaxl8.mongodb.net/telegram_bot?retryWrites=true&w=majority"
 SUPPORT_GROUP  = "https://t.me/+6JT140NC2VtkODk1"
-LOG_GROUP_ID   = int(os.getenv("LOG_GROUP_ID", "0"))
+LOG_GROUP_ID   = 0   # No log group
 
 # ── APIs ──
 API_BASE          = "https://tg-to-num-six.vercel.app/"
@@ -43,8 +43,9 @@ logging.basicConfig(format="%(asctime)s | %(levelname)s | %(message)s", level=lo
 logger = logging.getLogger(__name__)
 HTML = ParseMode.HTML
 
+
 # ══════════════════════════════════════════════════════════════════
-#  🛡️  SAFE HELPERS (same as before)
+#  🛡️  SAFE HELPERS
 # ══════════════════════════════════════════════════════════════════
 def strip_html(text: str) -> str:
     return re.sub(r"<[^>]+>", "", text)
@@ -82,6 +83,7 @@ async def safe_edit(msg, text: str, reply_markup=None, parse_mode=HTML):
             pass
         else:
             logger.error("safe_edit error: %s", e)
+
 
 # ══════════════════════════════════════════════════════════════════
 #  🗄️  DATABASE
@@ -161,22 +163,16 @@ async def get_user_history(user_id, limit=10):
 def is_owner(user_id):
     return user_id == OWNER_ID
 
+
 # ══════════════════════════════════════════════════════════════════
 #  🔒  DAILY LIMIT SYSTEM
 # ══════════════════════════════════════════════════════════════════
 async def check_and_increment_lookup(user_id: int) -> tuple:
-    """
-    Returns (allowed, message, keyboard)
-    allowed: True if within limit and incremented, False if limit reached
-    message: info string
-    keyboard: optional reply markup
-    """
     today = datetime.now().strftime("%Y-%m-%d")
     user = await get_user(user_id)
     if not user:
         return False, "User not found", None
 
-    # Reset daily if new day
     if user.get("last_reset_date") != today:
         await _mdb.users.update_one(
             {"user_id": user_id},
@@ -190,7 +186,6 @@ async def check_and_increment_lookup(user_id: int) -> tuple:
     limit = DAILY_LIMIT + extra
 
     if daily >= limit:
-        # Limit reached
         kb = None
         if not user.get("has_shared_bonus", False):
             kb = InlineKeyboardMarkup([
@@ -203,15 +198,15 @@ async def check_and_increment_lookup(user_id: int) -> tuple:
             msg += "\n💡 <b>Share this bot</b> to get +3 extra lookups!"
         return False, msg, kb
 
-    # Increment daily count
     await _mdb.users.update_one(
         {"user_id": user_id},
         {"$inc": {"daily_lookups": 1}}
     )
     return True, None, None
 
+
 # ══════════════════════════════════════════════════════════════════
-#  🌐  API CALLS (same as before)
+#  🌐  API CALLS
 # ══════════════════════════════════════════════════════════════════
 async def fetch_info(query: str) -> dict:
     # ── Try primary API ──
@@ -295,8 +290,9 @@ async def fetch_phone_info(number: str) -> dict:
                 return {"success": False, "message": f"API Error {r.status}"}
             return await r.json(content_type=None)
 
+
 # ══════════════════════════════════════════════════════════════════
-#  🔐  FORCE SUBSCRIBE (same)
+#  🔐  FORCE SUBSCRIBE
 # ══════════════════════════════════════════════════════════════════
 async def ensure_membership(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     user_id = update.effective_user.id
@@ -330,6 +326,7 @@ async def ensure_membership(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     context.user_data["verified_membership"] = True
     return True
+
 
 # ══════════════════════════════════════════════════════════════════
 #  🎨  HELPERS & KEYBOARDS
@@ -520,13 +517,12 @@ async def user_profile_text(user_id: int, full_name: str) -> str:
 
 
 # ══════════════════════════════════════════════════════════════════
-#  🔎  CORE LOOKUPS (with limit check)
+#  🔎  CORE LOOKUPS
 # ══════════════════════════════════════════════════════════════════
 async def perform_lookup(update: Update, ctx: ContextTypes.DEFAULT_TYPE, query: str):
     user_id = update.effective_user.id
     await upsert_user(update.effective_user)
 
-    # ── Limit check ──
     allowed, msg, kb = await check_and_increment_lookup(user_id)
     if not allowed:
         reply_fn = update.message.reply_text if update.message else update.callback_query.message.reply_text
@@ -576,7 +572,6 @@ async def perform_phone_lookup(update: Update, ctx: ContextTypes.DEFAULT_TYPE, n
     user_id = update.effective_user.id
     await upsert_user(update.effective_user)
 
-    # ── Limit check ──
     allowed, msg, kb = await check_and_increment_lookup(user_id)
     if not allowed:
         reply_fn = update.message.reply_text if update.message else update.callback_query.message.reply_text
@@ -624,7 +619,7 @@ async def perform_phone_lookup(update: Update, ctx: ContextTypes.DEFAULT_TYPE, n
 
 
 # ══════════════════════════════════════════════════════════════════
-#  📟  COMMANDS & BUTTON HANDLER
+#  📟  COMMANDS & HANDLERS
 # ══════════════════════════════════════════════════════════════════
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await ensure_membership(update, ctx):
@@ -637,7 +632,6 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     u = await get_user(uid)
     total_lookups = (u["total_lookups"] if u else 0) + (u["total_phone_lookups"] if u else 0)
 
-    # Show remaining
     today = datetime.now().strftime("%Y-%m-%d")
     if u.get("last_reset_date") != today:
         daily = 0
@@ -729,19 +723,16 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             if "message is not modified" not in str(e).lower():
                 logger.warning("edit: %s", e)
 
-    # ── Share Bonus ──
     if data == "share_bonus":
         user = await get_user(uid)
         if user.get("has_shared_bonus", False):
             await q.answer("You already got your bonus!", show_alert=True)
             return
-        # Give bonus
         await _mdb.users.update_one(
             {"user_id": uid},
             {"$inc": {"extra_lookups": SHARE_BONUS}, "$set": {"has_shared_bonus": True}}
         )
         await q.answer(f"🎉 +{SHARE_BONUS} extra lookups added!", show_alert=True)
-        # Update message to show new limit
         u = await get_user(uid)
         today = datetime.now().strftime("%Y-%m-%d")
         if u.get("last_reset_date") != today:
@@ -761,7 +752,6 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # ── Verify membership ──
     if data == "verify_membership":
         if await ensure_membership(update, ctx):
             u = await get_user(uid)
@@ -808,7 +798,6 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         u = await get_user(uid)
         total_lookups = (u["total_lookups"] if u else 0) + (u["total_phone_lookups"] if u else 0)
         fname   = he(update.effective_user.first_name or "User")
-        # remaining
         today = datetime.now().strftime("%Y-%m-%d")
         if u.get("last_reset_date") != today:
             daily = 0
