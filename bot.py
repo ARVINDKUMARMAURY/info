@@ -188,7 +188,7 @@ def is_owner(user_id):
 
 
 # ══════════════════════════════════════════════════════════════════
-#  🔒  DAILY LIMIT SYSTEM (with .get() fixes)
+#  🔒  DAILY LIMIT SYSTEM
 # ══════════════════════════════════════════════════════════════════
 async def check_and_increment_lookup(user_id: int) -> tuple:
     today = datetime.now().strftime("%Y-%m-%d")
@@ -196,7 +196,6 @@ async def check_and_increment_lookup(user_id: int) -> tuple:
     if not user:
         return False, "User not found", None
 
-    # Ensure fields exist
     if user.get("last_reset_date") != today:
         await _mdb.users.update_one(
             {"user_id": user_id},
@@ -303,13 +302,11 @@ async def fetch_phone_info(number: str) -> dict:
 
 
 # ══════════════════════════════════════════════════════════════════
-#  🔐  FORCE SUBSCRIBE
+#  🔐  FORCE SUBSCRIBE (FIXED)
 # ══════════════════════════════════════════════════════════════════
 async def ensure_membership(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     user_id = update.effective_user.id
     if is_owner(user_id):
-        return True
-    if context.user_data.get("verified_membership"):
         return True
 
     not_joined = []
@@ -335,7 +332,6 @@ async def ensure_membership(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         )
         return False
 
-    context.user_data["verified_membership"] = True
     return True
 
 
