@@ -25,11 +25,15 @@ OWNER_USERNAME = "l_Smoke_ll"
 MONGO_URI      = os.getenv("MONGO_URI", "mongodb+srv://yb131567_db_user:R8zxuvc9Qn999Arg@cluster0.drjaxl8.mongodb.net/telegram_bot?retryWrites=true&w=majority")
 SUPPORT_GROUP  = "https://t.me/+6JT140NC2VtkODk1"
 LOG_GROUP_ID   = int(os.getenv("LOG_GROUP_ID", "0"))
-API_BASE       = "https://tg-to-num-six.vercel.app/"
-PHONE_API_BASE = "https://num-to-info-ten.vercel.app/"
+
+# ── APIs ──
+API_BASE          = "https://tg-to-num-six.vercel.app/"
+PHONE_API_URL     = "https://nmdllpezcocquamhgpmb.supabase.co/functions/v1/lookup"
+TG2PHONE_API_URL  = "https://project-fawn-eight-95.vercel.app/tg2phone/api"
+TG2PHONE_API_KEY  = "yadav"
 
 # ── Force Subscribe Channels ──
-REQUIRED_CHANNELS = ["@datacheak", "@Josap03"]   # usernames (with @)
+REQUIRED_CHANNELS = ["@datacheak", "@Josap03"]
 
 logging.basicConfig(format="%(asctime)s | %(levelname)s | %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -90,12 +94,10 @@ async def init_db():
     global _mongo_client, _mdb
     _mongo_client = AsyncIOMotorClient(MONGO_URI)
     _mdb          = _mongo_client.get_default_database()
-    # Create indexes
     await _mdb.users.create_index("user_id", unique=True)
     await _mdb.lookup_history.create_index("user_id")
     logger.info("✅ MongoDB connected")
 
-# ── Default user doc ──
 def _default_user(uid, username="", full_name="", language_code=""):
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     return {
@@ -148,7 +150,6 @@ def is_owner(user_id):
 #  📣  LOG GROUP NOTIFIER
 # ══════════════════════════════════════════════════════════════════
 async def notify_log_group(bot, text: str, kb=None):
-    """Send notification to log group if configured"""
     if not LOG_GROUP_ID:
         return
     try:
@@ -156,23 +157,91 @@ async def notify_log_group(bot, text: str, kb=None):
     except Exception as e:
         logger.warning("Log group notify failed: %s", e)
 
+
 # ══════════════════════════════════════════════════════════════════
 #  🌐  API CALLS
 # ══════════════════════════════════════════════════════════════════
 async def fetch_info(query: str) -> dict:
-    """Username/ID → phone number via tg-to-num API"""
-    timeout = aiohttp.ClientTimeout(total=15, connect=5)
-    async with aiohttp.ClientSession() as s:
-        async with s.get(API_BASE, params={"key": API_KEY, "q": query}, timeout=timeout) as r:
-            if r.status != 200:
-                return {"success": False, "message": f"API Error {r.status}"}
-            return await r.json(content_type=None)
+    """Try primary API first, fallback to secondary API"""
+    # ── Try primary API (tg-to-num) ──
+    try:
+        timeout = aiohttp.ClientTimeout(total=15, connect=5)
+        async with aiohttp.ClientSession() as s:
+            async with s.get(API_BASE, params={"key": API_KEY, "q": query}, timeout=timeout) as r:
+                if r.status == 200:
+                    data = await r.json(content_type=None)
+                    if data and data.get("success") != False:
+                        return data
+    except Exception as e:
+        logger.warning("Primary API failed: %s", e)
+
+    # ── Fallback to secondary API (tg2phone) ──
+    logger.info("Falling back to tg2phone API for: %s", query)
+    try:
+        timeout = aiohttp.ClientTimeout(total=15, connect=5)
+        async with aiohttp.ClientSession() as s:
+            async with s.get(TG2PHONE_API_URL, params={"key": TG2PHONE_API_KEY, "q": query}, timeout=timeout) as r:
+                if r.status != 200:
+                    return {"success": False, "message": f"API Error {r.status}"}
+                data = await r.json(content_type=None)
+
+                if not data or not data.get("result", {}).get("success"):
+                    return {"success": False, "message": "Not found in secondary API"}
+
+                result = data.get("result", {})
+                record = result.get("record", {})
+
+                # Get latest name from name_history
+                name = "—"
+                name_history = record.get("name_history", [])
+                if name_history and isinstance(name_history, list):
+                    latest = name_history[-1]
+                    names = latest.get("usernames_and_names", [])
+                    if names:
+                        for n in names:
+                            if not n.startswith("@"):
+                                name = n
+                                break
+
+                formatted = {
+                    "success": True,
+                    "user_id": result.get("tg_id"),
+                    "username": result.get("usernames", [""])[0] if result.get("usernames") else "",
+                    "full_name": name,
+                    "first_name": name,
+                    "phone_info": {
+                        "success": True,
+                        "number": result.get("number") or record.get("phone"),
+                        "country": result.get("country") or "—",
+                        "country_code": result.get("country_code") or "—",
+                    },
+                    "is_bot": False,
+                    "is_verified": False,
+                    "is_premium": False,
+                    "is_scam": False,
+                    "is_fake": False,
+                    "is_restricted": False,
+                    "status": "offline",
+                    "dc_id": None,
+                    "common_chats_count": 0,
+                    "_extra": {
+                        "contact_links": record.get("contact_links", []),
+                        "groups": record.get("groups", []),
+                        "interested_users_count": record.get("interested_users_count", 0),
+                        "interests": record.get("interests", []),
+                    }
+                }
+                return formatted
+
+    except Exception as e:
+        logger.exception("Secondary API failed")
+        return {"success": False, "message": str(e)}
 
 async def fetch_phone_info(number: str) -> dict:
-    """Phone number → details via num-to-info API"""
+    """Phone number → details via Supabase Edge Function"""
     timeout = aiohttp.ClientTimeout(total=15, connect=5)
     async with aiohttp.ClientSession() as s:
-        async with s.get(f"{PHONE_API_BASE}?num={number}", timeout=timeout) as r:
+        async with s.get(PHONE_API_URL, params={"number": number}, timeout=timeout) as r:
             if r.status != 200:
                 return {"success": False, "message": f"API Error {r.status}"}
             return await r.json(content_type=None)
@@ -182,17 +251,9 @@ async def fetch_phone_info(number: str) -> dict:
 #  🔐  FORCE SUBSCRIBE
 # ══════════════════════════════════════════════════════════════════
 async def ensure_membership(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """
-    Check if user has joined all required channels.
-    Returns True if allowed, else sends a join prompt and returns False.
-    Owner bypass is automatic.
-    """
     user_id = update.effective_user.id
-    # Owner bypass
     if is_owner(user_id):
         return True
-
-    # Already verified in this session
     if context.user_data.get("verified_membership"):
         return True
 
@@ -202,13 +263,10 @@ async def ensure_membership(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             member = await context.bot.get_chat_member(chat_id=channel, user_id=user_id)
             if member.status not in ("member", "administrator", "creator"):
                 not_joined.append(channel)
-        except Exception as e:
-            logger.warning(f"Could not check membership for {channel}: {e}")
-            # If we cannot check, assume not joined (safe side)
+        except Exception:
             not_joined.append(channel)
 
     if not_joined:
-        # Build join message and keyboard
         text = "⚠️ <b>Please join our channels to use this bot:</b>\n\n"
         keyboard = []
         for ch in not_joined:
@@ -222,7 +280,6 @@ async def ensure_membership(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         )
         return False
 
-    # All channels joined → mark verified for this session
     context.user_data["verified_membership"] = True
     return True
 
@@ -273,6 +330,23 @@ def format_tg_result(d: dict) -> str:
     name_line = f"👤 <b>{hv(fname)}</b>"
     if uname:
         name_line += f" | @{he(uname)}"
+
+    # ── Extra fields from secondary API ──
+    extra = d.get("_extra", {})
+    extra_lines = ""
+    if extra.get("contact_links"):
+        extra_lines += "\n📇 <b>Other Contacts</b>\n"
+        for link in extra["contact_links"][:5]:
+            extra_lines += f"└ {he(link)}\n"
+    if extra.get("groups"):
+        extra_lines += "\n👥 <b>Groups</b>\n"
+        for g in extra["groups"][:5]:
+            extra_lines += f"└ {he(g[:60])}…\n"
+    if extra.get("interested_users_count"):
+        extra_lines += f"\n👀 Interested Users: {extra['interested_users_count']}\n"
+    if extra.get("interests"):
+        extra_lines += f"🏷 Interests: {', '.join(he(i) for i in extra['interests'][:5])}\n"
+
     return (
         f"{name_line}\n"
         f"🆔 <code>{uid}</code>\n"
@@ -286,51 +360,54 @@ def format_tg_result(d: dict) -> str:
         + f"⭐ Premium : {bi(d.get('is_premium'))}\n"
         + flags_line
         + phone_line
+        + extra_lines
         + f"\n✦ <b>Made by @{OWNER_USERNAME}</b>"
     )
 
-def format_phone_result(d: dict, number: str) -> str:
+def format_phone_result(data: dict, number: str) -> str:
     """
-    Actual API: num-to-info-ten.vercel.app
+    Supabase Edge Function response format:
     {
       "success": true,
       "result": {
-        "results": [
-          { "mobile", "name", "fname", "address", "alt", "circle", "id", "email" }
-        ]
+        "success": true,
+        "result": {
+          "results": [ { "mobile", "name", "father_name", "address", "alternate", "circle", "aadhar", "email" } ]
+        }
       }
     }
     """
     ICONS = {
-        "name":    "👤",
-        "fname":   "👨",
+        "name": "👤",
+        "father_name": "👨",
         "address": "🏠",
-        "alt":     "📞",
-        "circle":  "📡",
-        "id":      "🪪",
-        "email":   "📧",
-        "mobile":  "📱",
+        "alternate": "📞",
+        "circle": "📡",
+        "aadhar": "🪪",
+        "email": "📧",
+        "mobile": "📱",
     }
     SKIP = {"mobile", "success", "cached", "proxyused", "attempt",
-            "credit", "developer", "status", "count", "search_time"}
-
-    # ── Extract rows from actual API format ──
-    rows = []
-    if isinstance(d, dict):
-        result_obj = d.get("result") or {}
-        if isinstance(result_obj, dict):
-            rows = result_obj.get("results") or []
+            "credit", "developer", "status", "count", "search_time", "tag"}
 
     lines = f"📱 <b>{he(number)}</b>\n\n"
 
-    if not rows:
+    # Extract results from nested structure
+    results = []
+    if data.get("success"):
+        outer_result = data.get("result") or {}
+        if outer_result.get("success"):
+            inner_result = outer_result.get("result") or {}
+            results = inner_result.get("results") or []
+
+    if not results:
         lines += "❌ <b>No data found</b>\n"
     else:
         # Deduplicate
         seen = set()
         unique = []
-        for r in rows:
-            key = (r.get("name",""), r.get("fname",""), r.get("address",""))
+        for r in results:
+            key = (r.get("name", ""), r.get("father_name", ""), r.get("address", ""))
             if key not in seen:
                 seen.add(key)
                 unique.append(r)
@@ -343,7 +420,7 @@ def format_phone_result(d: dict, number: str) -> str:
                     continue
                 if not v or str(v).strip() in ("", "null", "none", "0"):
                     continue
-                icon  = ICONS.get(k.lower(), "•")
+                icon = ICONS.get(k.lower(), "•")
                 label = k.replace("_", " ").title()
                 lines += f"{icon} <b>{label}</b> : {hv(str(v), maxlen=300)}\n"
         lines += "\n"
@@ -353,7 +430,6 @@ def format_phone_result(d: dict, number: str) -> str:
 
 
 def main_menu_kb(user_id=None):
-    """Main menu keyboard - completely free, no premium options"""
     kb = [
         [InlineKeyboardButton("📊 My Profile",    callback_data="my_account"),
          InlineKeyboardButton("📜 History",       callback_data="my_history")],
@@ -365,11 +441,6 @@ def main_menu_kb(user_id=None):
     return InlineKeyboardMarkup(kb)
 
 def two_button_kb(query: str):
-    """
-    2 buttons for search options:
-    📱 Telegram  → tg-to-num API (username/ID → telegram lookup)
-    📞 Number Info → num-to-info API (phone number details)
-    """
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📱 Telegram",    callback_data=f"search_tg:{query}"),
          InlineKeyboardButton("📞 Number Info", callback_data=f"search_ph:{query}")],
@@ -415,7 +486,7 @@ async def perform_lookup(update: Update, ctx: ContextTypes.DEFAULT_TYPE, query: 
 
     try:
         await asyncio.sleep(0.5)
-        data = await asyncio.wait_for(fetch_info(query), timeout=15)
+        data = await asyncio.wait_for(fetch_info(query), timeout=20)
 
         if not data or data.get("success") == False or "error" in data:
             err = data.get("message") or data.get("error") or "Not found"
@@ -475,8 +546,13 @@ async def perform_phone_lookup(update: Update, ctx: ContextTypes.DEFAULT_TYPE, n
             await safe_edit(msg, f"❌ <b>Error:</b> <code>{he(str(err))}</code>", reply_markup=back_kb())
             return
 
+        # Extract name from first result for history
+        result_name = ""
+        if data.get("result", {}).get("result", {}).get("results"):
+            result_name = data["result"]["result"]["results"][0].get("name", "")
+
         await save_lookup(user_id, number, "phone",
-                    result_name=data.get("name", ""), phone=number)
+                    result_name=result_name, phone=number)
 
         text = format_phone_result(data, number)
         await safe_edit(msg, text)
@@ -494,7 +570,6 @@ async def perform_phone_lookup(update: Update, ctx: ContextTypes.DEFAULT_TYPE, n
 #  📟  COMMANDS
 # ══════════════════════════════════════════════════════════════════
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    # Force subscribe check
     if not await ensure_membership(update, ctx):
         return
 
@@ -523,7 +598,6 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 #  💬  SMART MESSAGE HANDLER
 # ══════════════════════════════════════════════════════════════════
 async def smart_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    # Force subscribe check
     if not await ensure_membership(update, ctx):
         return
 
@@ -532,7 +606,6 @@ async def smart_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     waiting = ctx.user_data.get("waiting")
     await upsert_user(update.effective_user)
 
-    # ── Broadcast (owner only) ──
     if waiting == "broadcast":
         if uid != OWNER_ID:
             return
@@ -550,18 +623,15 @@ async def smart_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                         f"✅ <b>Broadcast Done!</b>\n├ Sent   : {sent}\n└ Failed : {failed}")
         return
 
-    # ── Waiting for phone after Number Info click ──
     if ctx.user_data.pop("waiting_ph", False):
         await perform_phone_lookup(update, ctx, text)
         return
 
-    # ── Auto-detect input ──
     is_phone    = text.lstrip("+").isdigit() and len(text.lstrip("+")) >= 7
     is_userid   = text.lstrip("-").isdigit() and not is_phone
     is_username = text.startswith("@")
 
     if is_username or is_userid or is_phone:
-        # Hamesha 2 buttons - Telegram aur Number Info
         await safe_send(
             update.message.reply_text,
             f"🔍 <b>Detected:</b> <code>{he(text)}</code>\n\n"
@@ -597,11 +667,8 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             if "message is not modified" not in str(e).lower():
                 logger.warning("edit: %s", e)
 
-    # ── Force Subscribe Verification ──
     if data == "verify_membership":
-        # Re-check membership
         if await ensure_membership(update, ctx):
-            # Now joined -> show main menu
             u = await get_user(uid)
             total_lookups = (u["total_lookups"] if u else 0) + (u["total_phone_lookups"] if u else 0)
             fname = he(update.effective_user.first_name or "User")
@@ -613,18 +680,11 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 f"✦ <b>Made by @{OWNER_USERNAME}</b>",
                 main_menu_kb(uid),
             )
-        else:
-            # Still not joined - keep the same message (do nothing)
-            pass
         return
 
-    # ── For all other callbacks, enforce membership first ──
     if not await ensure_membership(update, ctx):
         return
 
-    # ══════════════════════════════════════════════════
-    #  SEARCH TRIGGERS
-    # ══════════════════════════════════════════════════
     if data.startswith("search_tg:"):
         query = data[len("search_tg:"):]
         try: await q.message.delete()
@@ -636,12 +696,10 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         number = data[len("search_ph:"):]
         try: await q.message.delete()
         except Exception: pass
-        # Check karo ki actual phone number hai ya nahi
         clean = number.lstrip("+").replace(" ","").replace("-","")
         if clean.isdigit() and len(clean) >= 7:
             await perform_phone_lookup(update, ctx, number)
         else:
-            # Username/ID tha — phone number maango
             ctx.user_data["waiting_ph"] = True
             await safe_send(
                 update.callback_query.message.reply_text,
@@ -650,9 +708,6 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             )
         return
 
-    # ══════════════════════════════════════════════════
-    #  MAIN MENU
-    # ══════════════════════════════════════════════════
     if data == "main_menu":
         ctx.user_data.clear()
         u = await get_user(uid)
@@ -667,18 +722,12 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             main_menu_kb(uid),
         )
 
-    # ══════════════════════════════════════════════════
-    #  MY PROFILE
-    # ══════════════════════════════════════════════════
     elif data == "my_account":
         text = await user_profile_text(uid, update.effective_user.full_name or "User")
         await edit(text, InlineKeyboardMarkup([
             [InlineKeyboardButton("🏠 Main Menu", callback_data="main_menu")],
         ]))
 
-    # ══════════════════════════════════════════════════
-    #  HISTORY
-    # ══════════════════════════════════════════════════
     elif data == "my_history":
         history = await get_user_history(uid, 10)
         if not history:
@@ -693,9 +742,6 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             )
         await edit(lines, back_kb())
 
-    # ══════════════════════════════════════════════════
-    #  👑 OWNER PANEL
-    # ══════════════════════════════════════════════════
     elif data == "owner_panel":
         if not is_owner(uid): await q.answer("❌ Access denied!", show_alert=True); return
         users = await get_all_users()
