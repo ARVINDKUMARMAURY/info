@@ -1,6 +1,7 @@
 import os, re, json, logging, aiohttp, asyncio
 from motor.motor_asyncio import AsyncIOMotorClient
 from pymongo import ReturnDocument
+from pymongo.errors import DuplicateKeyError
 from html import escape as he
 from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
@@ -23,13 +24,11 @@ OWNER_ID       = 7302427268
 OWNER_USERNAME = "l_Smoke_ll"
 MONGO_URI      = "mongodb+srv://yb131567_db_user:R8zxuvc9Qn999Arg@cluster0.drjaxl8.mongodb.net/telegram_bot?retryWrites=true&w=majority"
 SUPPORT_GROUP  = "https://t.me/+6JT140NC2VtkODk1"
-LOG_GROUP_ID   = 0
+LOG_GROUP_ID   = -1003786474330
 
 # ── APIs ──
 TG2PHONE_API_URL  = "https://project-fawn-eight-95.vercel.app/tg2phone/api"
 TG2PHONE_API_KEY  = "yadav"   # Hardcoded key
-
-# ── Phone Lookup API ──
 PHONE_API_URL     = "https://nmdllpezcocquamhgpmb.supabase.co/functions/v1/lookup"
 
 # ── Force Subscribe Channels ──
@@ -97,8 +96,34 @@ def get_db():
 async def init_db():
     global _mongo_client, _mdb
     _mongo_client = AsyncIOMotorClient(MONGO_URI)
-    _mdb          = _mongo_client.get_default_database()
-    await _mdb.users.create_index("user_id", unique=True)
+    _mdb = _mongo_client.get_default_database()
+    
+    # ── Deduplicate users collection on user_id ──
+    try:
+        pipeline = [
+            {"$group": {"_id": "$user_id", "count": {"$sum": 1}, "ids": {"$push": "$_id"}}},
+            {"$match": {"count": {"$gt": 1}}}
+        ]
+        duplicates = await _mdb.users.aggregate(pipeline).to_list(length=None)
+        for dup in duplicates:
+            keep_id = dup["ids"][0]
+            remove_ids = dup["ids"][1:]
+            await _mdb.users.delete_many({"_id": {"$in": remove_ids}})
+            logger.info(f"Removed {len(remove_ids)} duplicate entries for user_id {dup['_id']}")
+    except Exception as e:
+        logger.warning("Deduplication step failed (maybe collection empty?): %s", e)
+
+    # ── Create unique index on user_id ──
+    try:
+        await _mdb.users.create_index("user_id", unique=True)
+        logger.info("✅ user_id unique index created")
+    except DuplicateKeyError as e:
+        logger.warning("DuplicateKeyError while creating unique index: %s", e)
+        # fallback: create non-unique index
+        await _mdb.users.create_index("user_id")
+        logger.info("✅ user_id non-unique index created (duplicates may exist)")
+
+    # ── Index for history ──
     await _mdb.lookup_history.create_index("user_id")
     logger.info("✅ MongoDB connected")
 
@@ -318,7 +343,7 @@ async def ensure_membership(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 
 # ══════════════════════════════════════════════════════════════════
-#  🎨  HELPERS & KEYBOARDS (same as before)
+#  🎨  HELPERS & KEYBOARDS
 # ══════════════════════════════════════════════════════════════════
 def hv(val, fallback="—", maxlen=300) -> str:
     if val is None or str(val).strip().lower() in ("", "null", "none"):
