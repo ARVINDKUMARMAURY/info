@@ -19,7 +19,7 @@ from telegram.error import BadRequest
 # ══════════════════════════════════════════════════════════════════
 #  ⚙️  CONFIG (HARDCODED)
 # ══════════════════════════════════════════════════════════════════
-BOT_TOKEN      = "8794125671:AAEJltnbzbA9ITaN09wuZ0byV0QDqVZXAAY"
+BOT_TOKEN      = "8794125671:AAE2Nq_UXRUOXYvVVjhclmvQA1xdhar7jGw"
 OWNER_ID       = 7302427268
 OWNER_USERNAME = "l_Smoke_ll"
 MONGO_URI      = "mongodb+srv://yb131567_db_user:R8zxuvc9Qn999Arg@cluster0.drjaxl8.mongodb.net/telegram_bot?retryWrites=true&w=majority"
