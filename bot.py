@@ -24,11 +24,11 @@ OWNER_ID       = 7302427268
 OWNER_USERNAME = "l_Smoke_ll"
 MONGO_URI      = "mongodb+srv://yb131567_db_user:R8zxuvc9Qn999Arg@cluster0.drjaxl8.mongodb.net/telegram_bot?retryWrites=true&w=majority"
 SUPPORT_GROUP  = "https://t.me/+6JT140NC2VtkODk1"
-LOG_GROUP_ID   = -1003786474330
+LOG_GROUP_ID   = 0
 
 # ── APIs ──
 TG2PHONE_API_URL  = "https://project-fawn-eight-95.vercel.app/tg2phone/api"
-TG2PHONE_API_KEY  = "yadav"   # Hardcoded key
+TG2PHONE_API_KEY  = "yadav"
 PHONE_API_URL     = "https://nmdllpezcocquamhgpmb.supabase.co/functions/v1/lookup"
 
 # ── Force Subscribe Channels ──
@@ -119,11 +119,9 @@ async def init_db():
         logger.info("✅ user_id unique index created")
     except DuplicateKeyError as e:
         logger.warning("DuplicateKeyError while creating unique index: %s", e)
-        # fallback: create non-unique index
         await _mdb.users.create_index("user_id")
         logger.info("✅ user_id non-unique index created (duplicates may exist)")
 
-    # ── Index for history ──
     await _mdb.lookup_history.create_index("user_id")
     logger.info("✅ MongoDB connected")
 
@@ -190,7 +188,7 @@ def is_owner(user_id):
 
 
 # ══════════════════════════════════════════════════════════════════
-#  🔒  DAILY LIMIT SYSTEM
+#  🔒  DAILY LIMIT SYSTEM (with .get() fixes)
 # ══════════════════════════════════════════════════════════════════
 async def check_and_increment_lookup(user_id: int) -> tuple:
     today = datetime.now().strftime("%Y-%m-%d")
@@ -198,6 +196,7 @@ async def check_and_increment_lookup(user_id: int) -> tuple:
     if not user:
         return False, "User not found", None
 
+    # Ensure fields exist
     if user.get("last_reset_date") != today:
         await _mdb.users.update_one(
             {"user_id": user_id},
@@ -234,7 +233,6 @@ async def check_and_increment_lookup(user_id: int) -> tuple:
 #  🌐  API CALLS
 # ══════════════════════════════════════════════════════════════════
 async def fetch_info(query: str) -> dict:
-    """Only tg2phone API"""
     logger.info("Fetching info for: %s", query)
     try:
         timeout = aiohttp.ClientTimeout(total=15, connect=5)
@@ -250,7 +248,6 @@ async def fetch_info(query: str) -> dict:
                 result = data.get("result", {})
                 record = result.get("record", {})
 
-                # Get latest name
                 name = "—"
                 name_history = record.get("name_history", [])
                 if name_history and isinstance(name_history, list):
@@ -523,9 +520,9 @@ async def user_profile_text(user_id: int, full_name: str) -> str:
         f"├ Used  : {daily} / {limit}\n"
         f"└ Extra : +{extra}\n\n"
         f"📈 <b>Total Stats</b>\n"
-        f"├ Username Lookups : {(u['total_lookups'] if u else 0)}\n"
-        f"├ Phone Lookups    : {(u['total_phone_lookups'] if u else 0)}\n"
-        f"└ Joined           : {(u['joined_at'] or '')[:10] if u else '—'}\n\n"
+        f"├ Username Lookups : {u.get('total_lookups', 0)}\n"
+        f"├ Phone Lookups    : {u.get('total_phone_lookups', 0)}\n"
+        f"└ Joined           : {(u.get('joined_at') or '')[:10] if u else '—'}\n\n"
         f"✦ <b>Made by @{OWNER_USERNAME}</b>"
     )
 
@@ -633,7 +630,7 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     fname = he(update.effective_user.first_name or "User")
 
     u = await get_user(uid)
-    total_lookups = (u["total_lookups"] if u else 0) + (u["total_phone_lookups"] if u else 0)
+    total_lookups = u.get("total_lookups", 0) + u.get("total_phone_lookups", 0)
 
     today = datetime.now().strftime("%Y-%m-%d")
     if u.get("last_reset_date") != today:
@@ -758,7 +755,7 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if data == "verify_membership":
         if await ensure_membership(update, ctx):
             u = await get_user(uid)
-            total_lookups = (u["total_lookups"] if u else 0) + (u["total_phone_lookups"] if u else 0)
+            total_lookups = u.get("total_lookups", 0) + u.get("total_phone_lookups", 0)
             fname = he(update.effective_user.first_name or "User")
             await edit(
                 f"🤖 <b>Smoke Bot</b>\n\n"
@@ -799,7 +796,7 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if data == "main_menu":
         ctx.user_data.clear()
         u = await get_user(uid)
-        total_lookups = (u["total_lookups"] if u else 0) + (u["total_phone_lookups"] if u else 0)
+        total_lookups = u.get("total_lookups", 0) + u.get("total_phone_lookups", 0)
         fname   = he(update.effective_user.first_name or "User")
         today = datetime.now().strftime("%Y-%m-%d")
         if u.get("last_reset_date") != today:
@@ -854,8 +851,8 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     elif data == "owner_stats":
         if not is_owner(uid): return
         users   = await get_all_users()
-        total_u = sum(u["total_lookups"] for u in users)
-        total_p = sum(u["total_phone_lookups"] for u in users)
+        total_u = sum(u.get("total_lookups", 0) for u in users)
+        total_p = sum(u.get("total_phone_lookups", 0) for u in users)
         await edit(
             f"📊 <b>Bot Statistics</b>\n━━━━━━━━━━━━━━━━━━\n\n"
             f"👥 Total Users        : {len(users)}\n"
@@ -870,11 +867,11 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         users  = await get_all_users()
         output = f"👥 <b>All Users ({len(users)})</b>\n━━━━━━━━━━━━━━━━━━\n\n"
         for u in users[:20]:
-            ru = u["total_lookups"]
-            rp = u["total_phone_lookups"]
+            ru = u.get("total_lookups", 0)
+            rp = u.get("total_phone_lookups", 0)
             output += (
-                f"🔍{ru}  📱{rp}  |  <code>{u['user_id']}</code> <b>{he(u['full_name'] or 'User')}</b>\n"
-                f"   🕐 {(u['last_seen'] or '')[:10]}\n\n"
+                f"🔍{ru}  📱{rp}  |  <code>{u['user_id']}</code> <b>{he(u.get('full_name', 'User'))}</b>\n"
+                f"   🕐 {(u.get('last_seen') or '')[:10]}\n\n"
             )
         if len(users) > 20:
             output += f"<i>...and {len(users)-20} more</i>"
