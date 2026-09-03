@@ -518,8 +518,25 @@ async def perform_lookup(update: Update, ctx: ContextTypes.DEFAULT_TYPE, query: 
         data = await asyncio.wait_for(fetch_info(query), timeout=20)
 
         if not data or data.get("success") == False or "error" in data:
-            err = data.get("message") or data.get("error") or "Not found"
-            await safe_edit(msg, f"❌ <b>Error:</b> <code>{he(str(err))}</code>", reply_markup=back_kb())
+            # 🔻 यहाँ आपका मनचाहा मैसेज डाल दिया गया है 🔻
+            await safe_edit(msg, "❌ <b>user ka data not available</b>", reply_markup=back_kb())
+            return
+
+        await save_lookup(user_id, query, "username",
+                    result_name=data.get("full_name", ""),
+                    result_id=str(data.get("user_id", "")),
+                    phone=(data.get("phone_info") or {}).get("number", ""))
+
+        text = format_tg_result(data)
+        await safe_edit(msg, text)
+
+    except asyncio.TimeoutError:
+        await safe_edit(msg, "❌ <b>Timeout!</b>", reply_markup=back_kb())
+    except aiohttp.ClientError:
+        await safe_edit(msg, "❌ <b>Network Error!</b>", reply_markup=back_kb())
+    except Exception as e:
+        logger.exception("perform_lookup")
+        await safe_edit(msg, f"❌ <b>Error:</b> <code>{he(str(e))}</code>", reply_markup=back_kb())
             return
 
         await save_lookup(user_id, query, "username",
