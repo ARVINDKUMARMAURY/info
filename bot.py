@@ -543,8 +543,9 @@ async def user_profile_text(user_id: int, full_name: str) -> str:
 #  🔎  CORE LOOKUPS
 # ══════════════════════════════════════════════════════════════════
 async def perform_lookup(update: Update, ctx: ContextTypes.DEFAULT_TYPE, query: str):
-    user_id = update.effective_user.id
-    await upsert_user(update.effective_user)
+    # DEBUG: proves the handler actually started running for this click.
+    logger.info("▶ perform_lookup START | query=%r | user=%s",
+                query, getattr(update.effective_user, "id", None))
 
     # FIX: use effective_chat.send_message instead of reply_text on the
     # (possibly already-deleted) callback message — reply_text tries to
@@ -552,12 +553,31 @@ async def perform_lookup(update: Update, ctx: ContextTypes.DEFAULT_TYPE, query: 
     # which raises "message to reply not found" and silently kills the flow.
     reply_fn = update.effective_chat.send_message
 
-    allowed, msg, kb = await check_and_increment_lookup(user_id)
-    if not allowed:
-        await safe_send(reply_fn, msg, reply_markup=kb)
-        return
+    # Everything below — including DB calls — is now wrapped, so ANY
+    # failure (Mongo, Telegram API, bad data) always results in a visible
+    # message to the user instead of dead silence.
+    try:
+        user_id = update.effective_user.id
+        await upsert_user(update.effective_user)
 
-    msg = await reply_fn("🔍 <b>Searching Telegram...</b>", parse_mode=HTML)
+        allowed, limit_msg, kb = await check_and_increment_lookup(user_id)
+        if not allowed:
+            logger.info("perform_lookup: daily limit reached for user=%s", user_id)
+            await safe_send(reply_fn, limit_msg, reply_markup=kb)
+            return
+
+        msg = await reply_fn("🔍 <b>Searching Telegram...</b>", parse_mode=HTML)
+    except Exception:
+        logger.exception("perform_lookup: FAILED before search even started (query=%r)", query)
+        try:
+            await reply_fn(
+                "❌ <b>Internal error before search started.</b>\n"
+                "Check Heroku logs for 'FAILED before search even started'.",
+                parse_mode=HTML,
+            )
+        except Exception:
+            logger.exception("perform_lookup: could not even send the error message")
+        return
 
     try:
         await asyncio.sleep(0.5)
@@ -575,36 +595,57 @@ async def perform_lookup(update: Update, ctx: ContextTypes.DEFAULT_TYPE, query: 
 
         text = format_tg_result(data)
         await safe_edit(msg, text)
+        logger.info("✔ perform_lookup DONE | query=%r | user=%s", query, user_id)
 
     except asyncio.TimeoutError:
+        logger.warning("perform_lookup: TIMEOUT | query=%r | user=%s", query, user_id)
         await safe_edit(msg, "❌ <b>Timeout!</b>", reply_markup=back_kb())
     except aiohttp.ClientError:
+        logger.exception("perform_lookup: NETWORK ERROR | query=%r | user=%s", query, user_id)
         await safe_edit(msg, "❌ <b>Network Error!</b>", reply_markup=back_kb())
     except Exception as e:
-        logger.exception("perform_lookup")
+        logger.exception("perform_lookup: UNEXPECTED ERROR | query=%r | user=%s", query, user_id)
         await safe_edit(msg, f"❌ <b>Error:</b> <code>{he(str(e))}</code>", reply_markup=back_kb())
 
 async def perform_phone_lookup(update: Update, ctx: ContextTypes.DEFAULT_TYPE, number: str):
-    user_id = update.effective_user.id
-    await upsert_user(update.effective_user)
+    # DEBUG: proves the handler actually started running for this click.
+    logger.info("▶ perform_phone_lookup START | number=%r | user=%s",
+                number, getattr(update.effective_user, "id", None))
 
     # FIX: same reason as perform_lookup above.
     reply_fn = update.effective_chat.send_message
 
-    allowed, msg, kb = await check_and_increment_lookup(user_id)
-    if not allowed:
-        await safe_send(reply_fn, msg, reply_markup=kb)
-        return
+    try:
+        user_id = update.effective_user.id
+        await upsert_user(update.effective_user)
 
-    number = number.strip().replace(" ", "").replace("-", "")
-    if not number.lstrip("+").isdigit() or len(number.lstrip("+")) < 7:
-        await safe_send(reply_fn,
-                        "❌ <b>Invalid number!</b>\n"
-                        "Example: <code>9876543210</code> or <code>+919876543210</code>",
-                        reply_markup=back_kb())
-        return
+        allowed, limit_msg, kb = await check_and_increment_lookup(user_id)
+        if not allowed:
+            logger.info("perform_phone_lookup: daily limit reached for user=%s", user_id)
+            await safe_send(reply_fn, limit_msg, reply_markup=kb)
+            return
 
-    msg = await reply_fn("📱 <b>Searching phone info...</b>", parse_mode=HTML)
+        clean_number = number.strip().replace(" ", "").replace("-", "")
+        if not clean_number.lstrip("+").isdigit() or len(clean_number.lstrip("+")) < 7:
+            await safe_send(reply_fn,
+                            "❌ <b>Invalid number!</b>\n"
+                            "Example: <code>9876543210</code> or <code>+919876543210</code>",
+                            reply_markup=back_kb())
+            return
+        number = clean_number
+
+        msg = await reply_fn("📱 <b>Searching phone info...</b>", parse_mode=HTML)
+    except Exception:
+        logger.exception("perform_phone_lookup: FAILED before search even started (number=%r)", number)
+        try:
+            await reply_fn(
+                "❌ <b>Internal error before search started.</b>\n"
+                "Check Heroku logs for 'FAILED before search even started'.",
+                parse_mode=HTML,
+            )
+        except Exception:
+            logger.exception("perform_phone_lookup: could not even send the error message")
+        return
 
     try:
         await asyncio.sleep(0.5)
@@ -624,13 +665,16 @@ async def perform_phone_lookup(update: Update, ctx: ContextTypes.DEFAULT_TYPE, n
 
         text = format_phone_result(data, number)
         await safe_edit(msg, text)
+        logger.info("✔ perform_phone_lookup DONE | number=%r | user=%s", number, user_id)
 
     except asyncio.TimeoutError:
+        logger.warning("perform_phone_lookup: TIMEOUT | number=%r | user=%s", number, user_id)
         await safe_edit(msg, "❌ <b>Timeout!</b>", reply_markup=back_kb())
     except aiohttp.ClientError:
+        logger.exception("perform_phone_lookup: NETWORK ERROR | number=%r | user=%s", number, user_id)
         await safe_edit(msg, "❌ <b>Network Error!</b>", reply_markup=back_kb())
     except Exception as e:
-        logger.exception("perform_phone_lookup")
+        logger.exception("perform_phone_lookup: UNEXPECTED ERROR | number=%r | user=%s", number, user_id)
         await safe_edit(msg, f"❌ <b>Error:</b> <code>{he(str(e))}</code>", reply_markup=back_kb())
 
 
@@ -764,6 +808,23 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
 
 async def smart_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    try:
+        await _smart_message_impl(update, ctx)
+    except Exception:
+        logger.exception("smart_message: UNCAUGHT ERROR | text=%r | user=%s",
+                          getattr(update.message, "text", None),
+                          getattr(update.effective_user, "id", None))
+        try:
+            await update.effective_chat.send_message(
+                "❌ <b>Kuch galat ho gaya.</b> Heroku logs me "
+                "'smart_message: UNCAUGHT ERROR' dhundo.",
+                parse_mode=HTML,
+            )
+        except Exception:
+            logger.exception("smart_message: could not even send the error message")
+
+
+async def _smart_message_impl(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await ensure_membership(update, ctx):
         return
 
@@ -834,6 +895,30 @@ async def smart_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
 
 async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """
+    Thin wrapper around the real handler so that ANY exception — Mongo
+    errors, Telegram API errors, anything — is guaranteed to be logged
+    AND shown to the user, instead of the click silently doing nothing.
+    """
+    q = update.callback_query
+    logger.info("▶ BUTTON CLICKED | data=%r | user=%s",
+                q.data if q else None, getattr(update.effective_user, "id", None))
+    try:
+        await _button_handler_impl(update, ctx)
+    except Exception:
+        logger.exception("button_handler: UNCAUGHT ERROR | data=%r | user=%s",
+                          q.data if q else None, getattr(update.effective_user, "id", None))
+        try:
+            await update.effective_chat.send_message(
+                "❌ <b>Kuch galat ho gaya button dabane par.</b>\n"
+                "Heroku logs me 'button_handler: UNCAUGHT ERROR' dhundo.",
+                parse_mode=HTML,
+            )
+        except Exception:
+            logger.exception("button_handler: could not even send the error message")
+
+
+async def _button_handler_impl(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q    = update.callback_query
     await q.answer()
     data = q.data
